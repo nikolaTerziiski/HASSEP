@@ -9,7 +9,7 @@ import { buildChecklistResult, areAllPassed } from "@/lib/domain/personal-hygien
 const personalHygieneSchema = z.object({
   checkDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Невалидна дата."),
   /** Boolean per checklist item, in order of HYGIENE_CHECKLIST_ITEMS */
-  checked: z.array(z.boolean()).length(6),
+  checked: z.array(z.boolean()).length(4),
   notes: z.string().max(1000, "Бележките може да са до 1000 символа.").optional(),
 });
 
