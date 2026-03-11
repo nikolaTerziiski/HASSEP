@@ -4,14 +4,39 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { requireRoleForAction } from "@/utils/auth/tenant";
 import { createServerSupabaseClient } from "@/utils/supabase/server";
-import { buildChecklistResult, areAllPassed } from "@/lib/domain/personal-hygiene";
 
-const personalHygieneSchema = z.object({
-  checkDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Невалидна дата."),
-  /** Boolean per checklist item, in order of HYGIENE_CHECKLIST_ITEMS */
-  checked: z.array(z.boolean()).length(4),
-  notes: z.string().max(1000, "Бележките може да са до 1000 символа.").optional(),
-});
+const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidISODate(value: string) {
+  if (!isoDatePattern.test(value)) {
+    return false;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    candidate.getUTCFullYear() === year &&
+    candidate.getUTCMonth() === month - 1 &&
+    candidate.getUTCDate() === day
+  );
+}
+
+const personalHygieneSchema = z
+  .object({
+    checkDate: z.string().refine(isValidISODate, {
+      message: "Невалидна дата.",
+    }),
+    checked: z.array(z.boolean()).optional(),
+    notes: z
+      .string()
+      .trim()
+      .max(1000, "Бележките може да са до 1000 символа.")
+      .optional(),
+  })
+  .strict();
+
+export type CreatePersonalHygieneLogInput = z.infer<typeof personalHygieneSchema>;
 
 export type PersonalHygieneResult = {
   ok: boolean;
@@ -19,29 +44,35 @@ export type PersonalHygieneResult = {
 };
 
 export async function createPersonalHygieneLogAction(
-  input: z.infer<typeof personalHygieneSchema>,
+  input: CreatePersonalHygieneLogInput,
 ): Promise<PersonalHygieneResult> {
   try {
     const profile = await requireRoleForAction(["owner", "manager", "staff"]);
     const parsed = personalHygieneSchema.parse(input);
     const supabase = await createServerSupabaseClient();
-    const checklistResult = buildChecklistResult(parsed.checked);
-    const allPassed = areAllPassed(checklistResult);
 
-    const { error } = await supabase.from("personal_hygiene_logs").insert({
-      organization_id: profile.organization_id,
-      user_id: profile.id,
-      check_date: parsed.checkDate,
-      notes: parsed.notes?.trim() || null,
-      checklist_result: checklistResult,
-      all_passed: allPassed,
-      performed_at: new Date().toISOString(),
-    });
+    const notes = parsed.notes?.trim() || null;
+    const hasReportedIssue = notes !== null;
+    const allChecked =
+      Array.isArray(parsed.checked) &&
+      parsed.checked.length > 0 &&
+      parsed.checked.every((item) => item === true);
+    const isHealthy = !hasReportedIssue && allChecked;
+
+    const { error } = await supabase.from("personal_hygiene_logs").upsert(
+      {
+        organization_id: profile.organization_id,
+        user_id: profile.id,
+        check_date: parsed.checkDate,
+        is_healthy: isHealthy,
+        notes,
+      },
+      {
+        onConflict: "organization_id,user_id,check_date",
+      },
+    );
 
     if (error) {
-      if (error.code === "23505") {
-        return { ok: false, message: "Вече сте подали проверка за днес." };
-      }
       return { ok: false, message: error.message };
     }
 
