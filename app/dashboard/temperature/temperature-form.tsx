@@ -1,30 +1,23 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm, useWatch } from "react-hook-form";
-import { z } from "zod";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useCallback, useMemo, useState, useTransition } from "react";
 import {
-  Form,
-  FormControl,
-  FormDescription,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+  Thermometer,
+  Snowflake,
+  CheckCircle2,
+  AlertTriangle,
+  Minus,
+  Plus,
+  Save,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { isTempOutOfRange, requiresCorrectiveAction } from "@/lib/domain/temperature";
 import { createTemperatureLogAction } from "./actions";
 
 type EquipmentType = "fridge" | "freezer" | "room";
 
-type EquipmentOption = {
+type Equipment = {
   id: string;
   name: string;
   type: EquipmentType;
@@ -33,294 +26,350 @@ type EquipmentOption = {
 };
 
 type TemperatureFormProps = {
-  equipmentList: EquipmentOption[];
+  equipmentList: Equipment[];
+  alreadyLoggedIds?: string[];
+  /** @deprecated kept for backwards compat with page.tsx */
   preselectedEquipmentId?: string;
 };
 
-const baseSchema = z.object({
-  equipmentId: z.string().min(1, "Изберете уред."),
-  recordedTemp: z
-    .coerce
-    .number({ invalid_type_error: "Въведете валидна температура." })
-    .min(-30, "Температурата трябва да е минимум -30°C.")
-    .max(100, "Температурата трябва да е максимум 100°C."),
-  correctiveAction: z
-    .string()
-    .max(500, "Коригиращото действие може да е до 500 символа.")
-    .optional(),
-});
+type EntryState = {
+  temp: string;
+  correctiveAction: string;
+};
 
-function formatTimestampToMinute(isoString: string) {
-  return new Intl.DateTimeFormat("bg-BG", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(isoString));
+function isInRange(temp: number, eq: Equipment): boolean {
+  return temp >= eq.min_temp && temp <= eq.max_temp;
 }
 
-function formatType(type: EquipmentType) {
-  if (type === "fridge") return "Хладилник";
-  if (type === "freezer") return "Фризер";
-  return "Помещение";
+function equipmentIcon(type: EquipmentType) {
+  if (type === "freezer") return Snowflake;
+  return Thermometer;
 }
 
-export function TemperatureForm({ equipmentList, preselectedEquipmentId }: TemperatureFormProps) {
-  const [lastRecordedAt, setLastRecordedAt] = useState<string | null>(null);
-  const [serverMessage, setServerMessage] = useState<string | null>(null);
+export function TemperatureForm({
+  equipmentList,
+  alreadyLoggedIds = [],
+}: TemperatureFormProps) {
+  const loggedSet = useMemo(
+    () => new Set(alreadyLoggedIds),
+    [alreadyLoggedIds],
+  );
+
+  const [entries, setEntries] = useState<Record<string, EntryState>>(() => {
+    const init: Record<string, EntryState> = {};
+    for (const eq of equipmentList) {
+      if (!loggedSet.has(eq.id)) {
+        init[eq.id] = { temp: "", correctiveAction: "" };
+      }
+    }
+    return init;
+  });
+
+  const [justSaved, setJustSaved] = useState<Set<string>>(new Set());
   const [serverError, setServerError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  const equipmentById = useMemo(
-    () => new Map(equipmentList.map((equipment) => [equipment.id, equipment])),
-    [equipmentList],
-  );
-
-  const schema = useMemo(
-    () =>
-      baseSchema.superRefine((values, ctx) => {
-        const selectedEquipment = equipmentById.get(values.equipmentId);
-        const correctiveAction = values.correctiveAction?.trim();
-
-        if (!selectedEquipment) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["equipmentId"],
-            message: "Изберете валиден уред.",
-          });
-          return;
-        }
-
-        if (requiresCorrectiveAction(values.recordedTemp, selectedEquipment) && !correctiveAction) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["correctiveAction"],
-            message: `Температурата ${values.recordedTemp}°C е извън диапазона (${selectedEquipment.min_temp}°C – ${selectedEquipment.max_temp}°C). Въведете коригиращо действие.`,
-          });
-        }
-      }),
-    [equipmentById],
-  );
-
-  const form = useForm<z.infer<typeof baseSchema>>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      equipmentId: preselectedEquipmentId ?? "",
-      recordedTemp: 0,
-      correctiveAction: "",
+  const updateEntry = useCallback(
+    (id: string, patch: Partial<EntryState>) => {
+      setEntries((prev) => ({
+        ...prev,
+        [id]: { ...prev[id], ...patch },
+      }));
     },
-  });
-
-  const selectedEquipmentId = useWatch({
-    control: form.control,
-    name: "equipmentId",
-  });
-
-  const watchedTemp = useWatch({
-    control: form.control,
-    name: "recordedTemp",
-  });
-
-  const selectedEquipment = useMemo(
-    () => equipmentById.get(selectedEquipmentId),
-    [equipmentById, selectedEquipmentId],
+    [],
   );
 
-  const tempNum = typeof watchedTemp === "number" ? watchedTemp : Number(watchedTemp);
-  const isOutOfRange = selectedEquipment && !Number.isNaN(tempNum)
-    ? isTempOutOfRange(tempNum, selectedEquipment)
-    : false;
+  const stepTemp = useCallback((id: string, delta: number) => {
+    setEntries((prev) => {
+      const current = prev[id];
+      const currentVal = current.temp === "" ? 0 : parseFloat(current.temp);
+      const next = Math.round((currentVal + delta) * 10) / 10;
+      return {
+        ...prev,
+        [id]: { ...current, temp: String(next) },
+      };
+    });
+  }, []);
 
-  const onSubmit = (values: z.infer<typeof baseSchema>) => {
-    setServerMessage(null);
+  // Collect pending vs completed equipment
+  const pendingEquipment = equipmentList.filter(
+    (eq) => !loggedSet.has(eq.id) && !justSaved.has(eq.id),
+  );
+  const completedEquipment = equipmentList.filter(
+    (eq) => loggedSet.has(eq.id) || justSaved.has(eq.id),
+  );
+
+  // Entries that are valid and ready to submit
+  const filledEntries = pendingEquipment.filter((eq) => {
+    const entry = entries[eq.id];
+    if (!entry || entry.temp === "") return false;
+    const temp = parseFloat(entry.temp);
+    if (Number.isNaN(temp)) return false;
+    if (!isInRange(temp, eq) && !entry.correctiveAction.trim()) return false;
+    return true;
+  });
+
+  const canSubmit = filledEntries.length > 0 && !isPending;
+
+  const handleSubmitAll = () => {
     setServerError(null);
 
     startTransition(async () => {
-      const result = await createTemperatureLogAction({
-        equipmentId: values.equipmentId,
-        recordedTemp: values.recordedTemp,
-        correctiveAction: values.correctiveAction,
-      });
+      const toSubmit = filledEntries.map((eq) => ({
+        eq,
+        entry: entries[eq.id],
+      }));
 
-      if (!result.ok) {
-        setServerError(result.message);
-        return;
+      const results = await Promise.all(
+        toSubmit.map(({ eq, entry }) =>
+          createTemperatureLogAction({
+            equipmentId: eq.id,
+            recordedTemp: parseFloat(entry.temp),
+            correctiveAction: entry.correctiveAction.trim() || undefined,
+          }).then((res) => ({ eqId: eq.id, ...res })),
+        ),
+      );
+
+      const succeeded = results.filter((r) => r.ok).map((r) => r.eqId);
+      const failed = results.filter((r) => !r.ok);
+
+      if (succeeded.length > 0) {
+        setJustSaved((prev) => {
+          const next = new Set(prev);
+          for (const id of succeeded) next.add(id);
+          return next;
+        });
       }
 
-      setServerMessage(result.message);
-      if (result.recordedAt) {
-        setLastRecordedAt(result.recordedAt);
+      if (failed.length > 0) {
+        setServerError(
+          `Грешка при ${failed.length} от ${results.length} записа: ${failed[0].message}`,
+        );
       }
-
-      form.reset({
-        equipmentId: values.equipmentId,
-        recordedTemp: 0,
-        correctiveAction: "",
-      });
     });
   };
 
   return (
-    <section className="space-y-4">
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Температурен дневник</CardTitle>
-          <CardDescription>
-            Изберете уред и въведете измерената температура.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
-              <FormField
-                control={form.control}
-                name="equipmentId"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-sm font-semibold">Уред</FormLabel>
-                    <Select onValueChange={field.onChange} value={field.value}>
-                      <FormControl>
-                        <SelectTrigger className="h-12 text-base" data-testid="equipment-select">
-                          <SelectValue placeholder="Изберете уред" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {equipmentList.map((equipment) => (
-                          <SelectItem
-                            key={equipment.id}
-                            value={equipment.id}
-                            className="py-3 text-base"
-                          >
-                            <span className="font-medium">{equipment.name}</span>
-                            <span className="ml-2 text-xs text-slate-500">
-                              {formatType(equipment.type)} ({equipment.min_temp}°C – {equipment.max_temp}°C)
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {selectedEquipment ? (
-                      <div className="mt-1 flex items-center gap-2 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                        <span className="font-medium">{formatType(selectedEquipment.type)}</span>
-                        <span className="text-slate-400">|</span>
-                        <span>Допустимо: {selectedEquipment.min_temp}°C – {selectedEquipment.max_temp}°C</span>
-                      </div>
-                    ) : null}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+    <div className="space-y-4">
+      {/* Section label */}
+      {pendingEquipment.length > 0 && (
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+          Очакващи проверка — {pendingEquipment.length} уреда
+        </p>
+      )}
 
-              <FormField
-                control={form.control}
-                name="recordedTemp"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-sm font-semibold">Температура (°C)</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type="number"
-                          inputMode="decimal"
-                          placeholder="0.0"
-                          step="0.1"
-                          className={`h-14 text-center text-2xl font-bold tabular-nums ${
-                            selectedEquipment
-                              ? isOutOfRange
-                                ? "border-red-400 bg-red-50 text-red-700 focus-visible:ring-red-400"
-                                : "border-emerald-400 bg-emerald-50 text-emerald-700 focus-visible:ring-emerald-400"
-                              : ""
-                          }`}
-                          data-testid="temperature-input"
-                          {...field}
-                          onChange={(event) => field.onChange(event.target.value)}
-                        />
-                        {selectedEquipment ? (
-                          <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                            {isOutOfRange ? (
-                              <AlertTriangle className="h-5 w-5 text-red-500" />
-                            ) : (
-                              <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                            )}
-                          </div>
-                        ) : null}
-                      </div>
-                    </FormControl>
-                    {selectedEquipment && isOutOfRange ? (
-                      <p className="mt-1 flex items-center gap-1 rounded-md bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                        Извън допустимия диапазон! Необходимо е коригиращо действие.
-                      </p>
-                    ) : null}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+      {/* ── Pending equipment cards ── */}
+      {pendingEquipment.map((eq) => {
+        const entry = entries[eq.id] ?? { temp: "", correctiveAction: "" };
+        const tempVal = entry.temp === "" ? null : parseFloat(entry.temp);
+        const hasValue = tempVal !== null && !Number.isNaN(tempVal);
+        const inRange = hasValue ? isInRange(tempVal, eq) : null;
+        const Icon = equipmentIcon(eq.type);
 
-              <FormField
-                control={form.control}
-                name="correctiveAction"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-sm font-semibold">
-                      Коригиращо действие
-                      {isOutOfRange ? (
-                        <span className="ml-1 text-xs font-normal text-red-600">(задължително)</span>
-                      ) : (
-                        <span className="ml-1 text-xs font-normal text-slate-400">(при отклонение)</span>
-                      )}
-                    </FormLabel>
-                    <FormControl>
-                      <Textarea
-                        placeholder="Опишете предприетото действие при отклонение."
-                        className={`min-h-20 text-base ${isOutOfRange ? "border-red-300" : ""}`}
-                        data-testid="corrective-action-textarea"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription className="text-xs">
-                      {selectedEquipment
-                        ? `Задължително при отклонение извън ${selectedEquipment.min_temp}°C – ${selectedEquipment.max_temp}°C.`
-                        : "Задължително при температура извън допустимия диапазон."}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+        let cardClasses = "rounded-2xl border-2 transition-all duration-200";
+        if (!hasValue) {
+          cardClasses += " border-slate-200 bg-white";
+        } else if (inRange) {
+          cardClasses += " border-emerald-300 bg-emerald-50/60";
+        } else {
+          cardClasses += " border-red-300 bg-red-50/60";
+        }
 
-              <div className="space-y-3 pt-2">
-                <Button
-                  type="submit"
-                  disabled={isPending}
-                  className="h-12 w-full text-base font-semibold"
-                  data-testid="submit-temperature"
-                >
-                  {isPending ? "Записване..." : "Запиши измерването"}
-                </Button>
-
-                {serverMessage ? (
-                  <div className="flex items-center gap-2 rounded-lg bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
-                    <CheckCircle2 className="h-4 w-4 shrink-0" />
-                    {serverMessage}
+        return (
+          <Card key={eq.id} className={cardClasses}>
+            <CardContent className="px-5 py-5">
+              {/* Equipment header */}
+              <div className="mb-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
+                      !hasValue
+                        ? "bg-slate-100 text-slate-400"
+                        : inRange
+                          ? "bg-emerald-100 text-emerald-600"
+                          : "bg-red-100 text-red-600"
+                    }`}
+                  >
+                    <Icon className="h-5 w-5" />
                   </div>
-                ) : null}
-                {serverError ? (
-                  <div className="flex items-center gap-2 rounded-lg bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
-                    <AlertTriangle className="h-4 w-4 shrink-0" />
-                    {serverError}
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-900">
+                      {eq.name}
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      {eq.min_temp}°C – {eq.max_temp}°C
+                    </p>
                   </div>
-                ) : null}
-                {lastRecordedAt ? (
-                  <p className="text-center text-xs text-slate-500">
-                    Последно записване: {formatTimestampToMinute(lastRecordedAt)} ч.
-                  </p>
-                ) : null}
+                </div>
+
+                {/* Status badge */}
+                {hasValue && (
+                  <div
+                    className={`flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${
+                      inRange
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-red-100 text-red-700"
+                    }`}
+                  >
+                    {inRange ? (
+                      <>
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        Нормална
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        Критично!
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
-            </form>
-          </Form>
-        </CardContent>
-      </Card>
-    </section>
+
+              {/* ── Stepper input ── */}
+              <div className="flex items-center gap-2">
+                {/* Minus button */}
+                <button
+                  type="button"
+                  onClick={() => stepTemp(eq.id, -0.5)}
+                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 transition active:scale-95 active:bg-slate-200"
+                  aria-label="Намали с 0.5°C"
+                >
+                  <Minus className="h-6 w-6" />
+                </button>
+
+                {/* Temperature input */}
+                <div className="relative flex-1">
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step="0.1"
+                    placeholder="—"
+                    value={entry.temp}
+                    onChange={(e) =>
+                      updateEntry(eq.id, { temp: e.target.value })
+                    }
+                    className={`h-14 w-full rounded-xl border-2 bg-white text-center text-3xl font-bold tabular-nums outline-none transition-colors ${
+                      !hasValue
+                        ? "border-slate-200 text-slate-900 focus:border-slate-400"
+                        : inRange
+                          ? "border-emerald-300 text-emerald-700 focus:border-emerald-500"
+                          : "border-red-300 text-red-700 focus:border-red-500"
+                    }`}
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-400">
+                    °C
+                  </span>
+                </div>
+
+                {/* Plus button */}
+                <button
+                  type="button"
+                  onClick={() => stepTemp(eq.id, 0.5)}
+                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 transition active:scale-95 active:bg-slate-200"
+                  aria-label="Увеличи с 0.5°C"
+                >
+                  <Plus className="h-6 w-6" />
+                </button>
+              </div>
+
+              {/* ── Out-of-range: corrective action ── */}
+              {hasValue && !inRange && (
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center gap-2 rounded-xl bg-red-100/80 px-3 py-2 text-xs font-semibold text-red-800">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    Извън допустимия диапазон! Въведете корективно действие.
+                  </div>
+                  <Textarea
+                    placeholder="Напр. преместих продуктите в друг хладилник…"
+                    value={entry.correctiveAction}
+                    onChange={(e) =>
+                      updateEntry(eq.id, {
+                        correctiveAction: e.target.value,
+                      })
+                    }
+                    className="min-h-20 rounded-xl border-red-200 bg-white text-base focus-visible:ring-red-400"
+                  />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+
+      {/* ── Submit all button ── */}
+      {pendingEquipment.length > 0 && (
+        <Button
+          onClick={handleSubmitAll}
+          disabled={!canSubmit}
+          className={`h-16 w-full rounded-2xl text-lg font-bold shadow-lg transition-all ${
+            canSubmit
+              ? "bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98]"
+              : "cursor-not-allowed bg-slate-300 text-slate-500"
+          }`}
+        >
+          <Save className="mr-2 h-6 w-6" />
+          {isPending
+            ? "Записване…"
+            : canSubmit
+              ? `Запиши температурите (${filledEntries.length})`
+              : "Въведете температури"}
+        </Button>
+      )}
+
+      {/* Server error */}
+      {serverError && (
+        <div className="flex items-center gap-3 rounded-2xl border-2 border-red-200 bg-red-50/60 px-4 py-4 text-sm font-medium text-red-800">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+          {serverError}
+        </div>
+      )}
+
+      {/* ── Completed equipment ── */}
+      {completedEquipment.length > 0 && (
+        <>
+          <p className="pt-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+            Проверени днес — {completedEquipment.length}
+          </p>
+          <div className="space-y-2">
+            {completedEquipment.map((eq) => {
+              const Icon = equipmentIcon(eq.type);
+              return (
+                <div
+                  key={eq.id}
+                  className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3"
+                >
+                  <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+                  <Icon className="h-4 w-4 shrink-0 text-emerald-400" />
+                  <span className="flex-1 text-sm font-medium text-emerald-800">
+                    {eq.name}
+                  </span>
+                  <span className="text-xs font-medium text-emerald-600">
+                    Проверен
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* All done state */}
+      {pendingEquipment.length === 0 && completedEquipment.length > 0 && (
+        <Card className="rounded-2xl border-emerald-200 bg-emerald-50/60">
+          <CardContent className="flex flex-col items-center gap-3 py-8">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100">
+              <CheckCircle2 className="h-7 w-7 text-emerald-600" />
+            </div>
+            <h3 className="text-lg font-semibold text-emerald-800">
+              Всички уреди са проверени!
+            </h3>
+            <p className="text-sm text-emerald-700/80">
+              Температурният дневник за днес е завършен.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+    </div>
   );
 }

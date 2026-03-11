@@ -43,7 +43,9 @@ export default async function TemperaturePage({ searchParams }: TemperaturePageP
   const supabase = await createServerSupabaseClient();
   const resolvedParams = await searchParams;
 
-  const [{ data, error }, { data: recentLogs }] = await Promise.all([
+  const today = getLocalISODate();
+
+  const [{ data, error }, { data: recentLogs }, { data: todayLogs }] = await Promise.all([
     supabase
       .from("equipment")
       .select("id, name, type, min_temp, max_temp, is_active")
@@ -56,6 +58,12 @@ export default async function TemperaturePage({ searchParams }: TemperaturePageP
       .eq("organization_id", profile.organization_id)
       .order("recorded_at", { ascending: false })
       .limit(20),
+    supabase
+      .from("haccp_logs")
+      .select("equipment_id")
+      .eq("organization_id", profile.organization_id)
+      .gte("recorded_at", `${today}T00:00:00`)
+      .lt("recorded_at", `${today}T23:59:59.999`),
   ]);
 
   if (error) {
@@ -82,16 +90,17 @@ export default async function TemperaturePage({ searchParams }: TemperaturePageP
     );
   }
 
-  const requestedEquipmentId = resolvedParams?.equipment_id;
-  const preselectedEquipmentId = equipmentList.some((item) => item.id === requestedEquipmentId)
-    ? requestedEquipmentId
-    : undefined;
+  const alreadyLoggedIds = [
+    ...new Set(
+      ((todayLogs ?? []) as { equipment_id: string }[]).map((l) => l.equipment_id),
+    ),
+  ];
 
   return (
     <div className="space-y-4">
       <TemperatureForm
         equipmentList={equipmentList}
-        preselectedEquipmentId={preselectedEquipmentId}
+        alreadyLoggedIds={alreadyLoggedIds}
       />
 
       {logRows.length > 0 ? (
