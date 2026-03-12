@@ -64,7 +64,7 @@ export async function createPersonalHygieneLogAction(
         organization_id: profile.organization_id,
         user_id: profile.id,
         check_date: parsed.checkDate,
-        is_healthy: isHealthy,
+        all_passed: isHealthy,
         notes,
       },
       {
