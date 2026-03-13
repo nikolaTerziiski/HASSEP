@@ -1,97 +1,50 @@
-import { requireProfileForPage } from "@/utils/auth/tenant";
-import { createServerSupabaseClient } from "@/utils/supabase/server";
 import { getLocalISODate } from "@/lib/date/local-day";
-import { deriveLogStatus } from "@/lib/domain/personal-hygiene";
-import { MyHygieneForm } from "./my-hygiene-form";
-import { HygieneDualView } from "./hygiene-dual-view";
-
-type TeamProfileRow = {
-  id: string;
-  username: string;
-  role: "manager" | "staff";
-};
-
-type PersonalHygieneLogRow = {
-  user_id: string;
-  notes: string | null;
-  created_at: string;
-};
+import { requireRoleForPage } from "@/utils/auth/tenant";
+import { createServerSupabaseClient } from "@/utils/supabase/server";
+import {
+  ShiftRosterClient,
+type ShiftRosterLog,
+  type ShiftRosterProfile,
+} from "./ShiftRosterClient";
 
 export default async function PersonalHygienePage() {
-  const profile = await requireProfileForPage();
+  const profile = await requireRoleForPage(["owner", "manager"]);
   const supabase = await createServerSupabaseClient();
-
   const today = getLocalISODate();
 
-  if (profile.role === "owner" || profile.role === "manager") {
-    const [{ data: teamProfiles, error: teamError }, { data: todayLogs, error: logsError }] =
-      await Promise.all([
-        supabase
-          .from("profiles")
-          .select("id, username, role")
-          .eq("organization_id", profile.organization_id)
-          .eq("is_active", true)
-          .in("role", ["manager", "staff"])
-          .order("username", { ascending: true }),
-        supabase
-          .from("personal_hygiene_logs")
-          .select("user_id, notes, created_at")
-          .eq("organization_id", profile.organization_id)
-          .eq("check_date", today)
-          .order("created_at", { ascending: false }),
-      ]);
+  const [{ data: profilesData, error: profilesError }, { data: todayLogsData, error: todayLogsError }] =
+    await Promise.all([
+      supabase
+        .from("profiles")
+        .select("id, username")
+        .eq("organization_id", profile.organization_id)
+        .order("username", { ascending: true }),
+      supabase
+        .from("personal_hygiene_logs")
+        .select("user_id, all_passed, notes")
+        .eq("organization_id", profile.organization_id)
+        .eq("check_date", today)
+        .order("user_id", { ascending: true }),
+    ]);
 
-    if (teamError) {
-      throw new Error(teamError.message);
-    }
-
-    if (logsError) {
-      throw new Error(logsError.message);
-    }
-
-    const latestLogByUser = new Map<string, PersonalHygieneLogRow>();
-    for (const log of (todayLogs ?? []) as PersonalHygieneLogRow[]) {
-      if (!latestLogByUser.has(log.user_id)) {
-        latestLogByUser.set(log.user_id, log);
-      }
-    }
-
-    const members = ((teamProfiles ?? []) as TeamProfileRow[]).map((member) => {
-      const latestLog = latestLogByUser.get(member.id) ?? null;
-      return {
-        id: member.id,
-        username: member.username,
-        role: member.role,
-        status: deriveLogStatus(latestLog),
-        notes: latestLog?.notes ?? null,
-        submittedAt: latestLog?.created_at ?? null,
-      } as const;
-    });
-
-    const ownLog = latestLogByUser.get(profile.id) ?? null;
-
-    return (
-      <section className="space-y-4">
-        <div>
-          <h2 className="text-2xl font-semibold">Лична хигиена</h2>
-          <p className="text-sm text-slate-600">
-            Вашата проверка и статус на екипа за {today}.
-          </p>
-        </div>
-        <HygieneDualView todayDate={today} hasLogToday={ownLog !== null} members={members} />
-      </section>
-    );
+  if (profilesError) {
+    throw new Error(profilesError.message);
   }
 
-  const { data: existingLog } = await supabase
-    .from("personal_hygiene_logs")
-    .select("id")
-    .eq("organization_id", profile.organization_id)
-    .eq("user_id", profile.id)
-    .eq("check_date", today)
-    .maybeSingle();
+  if (todayLogsError) {
+    throw new Error(todayLogsError.message);
+  }
 
-  return (
-    <MyHygieneForm todayDate={today} hasLogToday={!!existingLog} />
-  );
+  const profiles = (profilesData ?? []) as ShiftRosterProfile[];
+  const todayLogs = ((todayLogsData ?? []) as Array<{
+    user_id: string;
+    all_passed: boolean;
+    notes: string | null;
+  }>).map((log): ShiftRosterLog => ({
+    user_id: log.user_id,
+    is_healthy: log.all_passed,
+    notes: log.notes,
+  }));
+
+  return <ShiftRosterClient profiles={profiles} todayLogs={todayLogs} />;
 }
